@@ -9,19 +9,16 @@ int exec_exit(char **args);
 int exec_cd(char **args);
 int exec_help(char **args);
 char *c_list[] = {"exit", "help"};
-int cantidad_comandos(char **args)
-{
+int cantidad_comandos(){
     return sizeof(c_list) / sizeof(char *);
 }
 int (*command_list[])(char **) = {&exec_exit, &exec_help};
 
-int exec_exit(char **args)
-{
+int exec_exit(char **args) {
     exit(0);
 }
 
-int exec_help(char **args)
-{
+int exec_help(char **args) {
     printf("Esta es una shell básica\nLa lista de comandos es:\n");
     for (int i = 0; i < cantidad_comandos(args); i++)
     {
@@ -29,8 +26,7 @@ int exec_help(char **args)
     }
 }
 
-char **parsear_entrada()
-{
+char **parsear_entrada() {
     char *linea = NULL;
     size_t buffersize = 0;
 
@@ -49,7 +45,7 @@ char **parsear_entrada()
         char *token = strtok(linea, " \n\a\t");
         while (token != NULL)
         {
-            matriz_args[arg_num] = strdup(token); // copiar string
+            matriz_args[arg_num] = strdup(token); 
             if (arg_num >= (int)msize - 1)
             {
                 msize += 60;
@@ -63,18 +59,17 @@ char **parsear_entrada()
             arg_num++;
             token = strtok(NULL, " \n\a\t");
         }
-        matriz_args[arg_num] = NULL; // terminador
+        matriz_args[arg_num] = NULL; 
     }
 
     free(linea);
     return matriz_args;
 }
 
-int ejecutar(char **args)
-{
+int ejecutar(char **args) {
     pid_t pid = fork();
     if (pid == 0)
-    { // hijo
+    {
         if (execvp(args[0], args) == -1)
         {
             perror("execvp");
@@ -82,9 +77,9 @@ int ejecutar(char **args)
         exit(EXIT_FAILURE);
     }
     else if (pid > 0)
-    { // padre
+    { 
         int status;
-        wait(&status); // esperamos al hijo y guardamos su estado
+        wait(&status); 
         if (WIFEXITED(status))
         {
             printf("Código de salida: %d\n", WEXITSTATUS(status));
@@ -100,9 +95,8 @@ int ejecutar(char **args)
     }
 }
 
-int command_admin(char **args)
-{
-    for (int i = 0; i < cantidad_comandos(args); i++)
+int command_admin(char **args) {
+    for (int i = 0; i < cantidad_comandos(); i++)
     {
         if (strcmp(args[0], c_list[i]) == 0)
         {
@@ -111,30 +105,106 @@ int command_admin(char **args)
     }
     return ejecutar(args);
 }
-int main()
-{
+
+
+int ejecutar_pipes(char *linea) {
+    
+    char *comandos[64];
+    int n = 0;
+    char *token = strtok(linea, "|\n");
+    while (token != NULL) {
+        comandos[n++] = token;
+        token = strtok(NULL, "|\n");
+    }
+
+    int pipefd[2*(n-1)]; // necesitamos n-1 pipes
+    for (int i = 0; i < n-1; i++) {
+        if (pipe(pipefd + i*2) < 0) {
+            perror("pipe");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        pid_t pid = fork();
+        if (pid == 0) { 
+            // si no es el primer comando, redirigir entrada
+            if (i != 0) {
+                dup2(pipefd[(i-1)*2], STDIN_FILENO);
+            }
+            // si no es el último comando, redirigir salida
+            if (i != n-1) {
+                dup2(pipefd[i*2 + 1], STDOUT_FILENO);
+            }
+
+            // cerrar todos los pipes en el hijo
+            for (int j = 0; j < 2*(n-1); j++)
+                close(pipefd[j]);
+
+            char *args[64];
+            int m = 0;
+            char *arg_tok = strtok(comandos[i], " \t\n");
+            while (arg_tok != NULL) {
+                args[m++] = arg_tok;
+                arg_tok = strtok(NULL, " \t\n");
+            }
+            args[m] = NULL;
+
+            //comando si no es pipe
+            command_admin(args); 
+            exit(0);
+        } else if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    for (int i = 0; i < 2*(n-1); i++)
+        close(pipefd[i]);
+
+    for (int i = 0; i < n; i++) //Padre espera a todos los hijos
+        wait(NULL);
+
+    return 0;
+}
+
+int main() {
     char **argss;
 
-    while (1)
-    {
+    while (1) {
         printf(">");
         argss = parsear_entrada();
-        if (argss[0] == NULL)
-        {
+        if (argss[0] == NULL) {
             free(argss);
             continue;
         }
-        else
-        {
-            command_admin(argss);
 
-            for (int i = 0; argss[i] != NULL; i++)
-            {
-                free(argss[i]);
+        int hay_pipe = 0;
+        for (int i = 0; argss[i] != NULL; i++) {
+            if (strchr(argss[i], '|')) {
+                hay_pipe = 1;
+                break;
             }
-            free(argss);
         }
+
+        if (hay_pipe) {
+            char linea[1024] = "";
+            for (int i = 0; argss[i] != NULL; i++) {
+                strcat(linea, argss[i]);
+                strcat(linea, " ");
+            }
+            ejecutar_pipes(linea);
+        } else {
+            command_admin(argss);
+        }
+
+        for (int i = 0; argss[i] != NULL; i++)
+            free(argss[i]);
+        free(argss);
     }
 
     return 0;
 }
+
+
+

@@ -4,26 +4,107 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <time.h>
 
 int exec_exit(char **args);
 int exec_cd(char **args);
+int miprof(char**args);
 int exec_help(char **args);
-char *c_list[] = {"exit", "help"};
+char *c_list[] = {"exit", "help", "miprof"};
 int cantidad_comandos(){
     return sizeof(c_list) / sizeof(char *);
 }
-int (*command_list[])(char **) = {&exec_exit, &exec_help};
+int (*command_list[])(char **) = {&exec_exit, &exec_help, &miprof};
 
 int exec_exit(char **args) {
     exit(0);
 }
 
+void limpiar_matriz(char **input){
+  for (int i = 0; input[i] != NULL; i++) {
+    free(input[i]);
+  }
+  free(input);
+}
+
+int miprof(char **args){
+    if (args[1] == NULL) {
+        printf("Uso:\n-miprof ejec <comandos y argumentos>\n-miprof ejecsave <Direccion archivo> <comandos y argumentos>\n");
+    } else if (strcmp(args[1],"ejec")==0) {
+        char **nuevosargs = &args[2];
+        struct rusage usage;
+
+        pid_t procesoHijo_id = fork();
+        if(procesoHijo_id == 0){
+          execvp(nuevosargs[0],nuevosargs);
+          perror("Ha sucedido un error");
+          limpiar_matriz(nuevosargs);
+          exit(EXIT_FAILURE);
+        }else{
+          int estadoHijo;
+        if (wait4(procesoHijo_id,&estadoHijo,0,&usage) != -1) {
+            printf("Uso de CPU de los hijos:\n");
+            printf("  Tiempo de usuario: %ld segundos, %ld microsegundos\n",
+                usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
+            printf("  Tiempo de sistema: %ld segundos, %ld microsegundos\n",
+                usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+            printf("Tiempo en modo kernel: %ld.%06ld s\n",usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+        } else {
+            perror("Error al obtener recursos");
+        }
+	if(!WIFEXITED(estadoHijo)){
+	  perror("Error del proceso.");
+	}
+        }
+	
+    }else if(strcmp(args[1],"ejecsave")==0){
+        if(args[3]==NULL || args[2]==NULL){
+          printf("Error: no se rellenaron los argumentos minimos. (direccion y/o nombre del archivo, comando)\n");
+	  return -1;
+        }
+        char **nuevosargs = &args[3];
+        FILE *archivoEscritura = fopen(args[2], "a");
+
+        struct rusage usage;
+
+        pid_t procesoHijo_id = fork();
+        if(procesoHijo_id == 0){
+          execvp(nuevosargs[0],nuevosargs);
+          perror("Ha sucedido un error");
+          limpiar_matriz(args);
+          exit(EXIT_FAILURE);
+        }else{
+          int estadoHijo;
+	  if ((wait4(procesoHijo_id,&estadoHijo,0,&usage) != -1)) {
+	    if(WIFEXITED(estadoHijo) && WEXITSTATUS(estadoHijo) == EXIT_FAILURE){
+              fclose(archivoEscritura);
+	      return -1;
+	    }
+	    fprintf(archivoEscritura,"Comando en evaluacion: %s\n", nuevosargs[0]);
+	    fprintf(archivoEscritura,"Uso de CPU de los hijos:\n");
+	    fprintf(archivoEscritura,"  Tiempo de usuario: %ld segundos, %ld microsegundos\n",
+                  usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
+	    fprintf(archivoEscritura,"  Tiempo de sistema: %ld segundos, %ld microsegundos\n",
+                  usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	    fprintf(archivoEscritura,"Tiempo en modo kernel: %ld.%06ld s\n\n",usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+        } else {
+            perror("Error al obtener recursos");
+        }
+      }
+      fclose(archivoEscritura);
+    }else {
+        printf("Uso: miprof <argumento>\n");
+    }
+    return 0;
+}
 int exec_help(char **args) {
     printf("Esta es una shell básica\nLa lista de comandos es:\n");
     for (int i = 0; i < cantidad_comandos(args); i++)
     {
         printf("%s: \n", c_list[i]);
     }
+    return 0;
 }
 
 char **parsear_entrada() {
@@ -42,7 +123,8 @@ char **parsear_entrada() {
 
     if (getline(&linea, &buffersize, stdin) != -1)
     {
-        char *token = strtok(linea, " \n\a\t");
+        
+        char *token = strtok(linea, " \n\t");
         while (token != NULL)
         {
             matriz_args[arg_num] = strdup(token); 
@@ -57,7 +139,7 @@ char **parsear_entrada() {
                 }
             }
             arg_num++;
-            token = strtok(NULL, " \n\a\t");
+            token = strtok(NULL, " \n\t");
         }
         matriz_args[arg_num] = NULL; 
     }
@@ -67,6 +149,7 @@ char **parsear_entrada() {
 }
 
 int ejecutar(char **args) {
+  args[0];
     pid_t pid = fork();
     if (pid == 0)
     {
@@ -79,20 +162,13 @@ int ejecutar(char **args) {
     else if (pid > 0)
     { 
         int status;
-        wait(&status); 
-        if (WIFEXITED(status))
-        {
-            printf("Código de salida: %d\n", WEXITSTATUS(status));
-        }
-        else if (WIFSIGNALED(status))
-        {
-            printf("Hijo terminado por señal: %d\n", WTERMSIG(status));
-        }
+        wait(NULL); 
     }
     else
     {
         perror("fork");
     }
+    return 0;
 }
 
 int command_admin(char **args) {
@@ -205,6 +281,5 @@ int main() {
 
     return 0;
 }
-
 
 

@@ -6,6 +6,10 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <sys/time.h>
+#include <errno.h>
+
+volatile pid_t hijoCode; 
 
 int exec_exit(char **args);
 int exec_cd(char **args);
@@ -28,14 +32,20 @@ void limpiar_matriz(char **input){
   free(input);
 }
 
+void cancelar(int signum){
+  kill(hijoCode,SIGKILL);
+}
+
 int miprof(char **args){
     if (args[1] == NULL) {
         printf("Uso:\n-miprof ejec <comandos y argumentos>\n-miprof ejecsave <Direccion archivo> <comandos y argumentos>\n");
     } else if (strcmp(args[1],"ejec")==0) {
         char **nuevosargs = &args[2];
         struct rusage usage;
+	struct timespec inicio, final;
 
         pid_t procesoHijo_id = fork();
+	clock_gettime(CLOCK_MONOTONIC,&inicio);
         if(procesoHijo_id == 0){
           execvp(nuevosargs[0],nuevosargs);
           perror("Ha sucedido un error");
@@ -43,19 +53,23 @@ int miprof(char **args){
           exit(EXIT_FAILURE);
         }else{
           int estadoHijo;
-        if (wait4(procesoHijo_id,&estadoHijo,0,&usage) != -1) {
-            printf("Uso de CPU de los hijos:\n");
+          if (wait4(procesoHijo_id,&estadoHijo,0,&usage) != -1) {
+	    clock_gettime(CLOCK_MONOTONIC,&final);
+	    if(WIFEXITED(estadoHijo) && WEXITSTATUS(estadoHijo) == EXIT_FAILURE){
+	      return -1;
+	    }
+	    double tiempoReal = (final.tv_sec - inicio.tv_sec) + (final.tv_nsec - inicio.tv_nsec) / 1000000000.0;
+            printf("Tiempos de ejecucion:\n");
             printf("  Tiempo de usuario: %ld segundos, %ld microsegundos\n",
-                usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
+                  usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
             printf("  Tiempo de sistema: %ld segundos, %ld microsegundos\n",
                 usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
-            printf("Tiempo en modo kernel: %ld.%06ld s\n",usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
-        } else {
-            perror("Error al obtener recursos");
-        }
-	if(!WIFEXITED(estadoHijo)){
-	  perror("Error del proceso.");
-	}
+            printf("  Tiempo real: %f s\n",tiempoReal);
+	    printf("Peak de memoria maxima residente: %ld\n", usage.ru_maxrss);
+          } else {
+              perror("Error al obtener recursos");
+          }
+	  
         }
 	
     }else if(strcmp(args[1],"ejecsave")==0){
@@ -67,8 +81,10 @@ int miprof(char **args){
         FILE *archivoEscritura = fopen(args[2], "a");
 
         struct rusage usage;
+	struct timespec inicio, final;
 
         pid_t procesoHijo_id = fork();
+	clock_gettime(CLOCK_MONOTONIC,&inicio);
         if(procesoHijo_id == 0){
           execvp(nuevosargs[0],nuevosargs);
           perror("Ha sucedido un error");
@@ -77,22 +93,118 @@ int miprof(char **args){
         }else{
           int estadoHijo;
 	  if ((wait4(procesoHijo_id,&estadoHijo,0,&usage) != -1)) {
+	    clock_gettime(CLOCK_MONOTONIC,&final);
 	    if(WIFEXITED(estadoHijo) && WEXITSTATUS(estadoHijo) == EXIT_FAILURE){
               fclose(archivoEscritura);
 	      return -1;
 	    }
+	    double tiempoReal = (final.tv_sec - inicio.tv_sec) + (final.tv_nsec - inicio.tv_nsec) / 1000000000.0;
 	    fprintf(archivoEscritura,"Comando en evaluacion: %s\n", nuevosargs[0]);
-	    fprintf(archivoEscritura,"Uso de CPU de los hijos:\n");
+	    fprintf(archivoEscritura,"Tiempos de ejecucion:\n");
 	    fprintf(archivoEscritura,"  Tiempo de usuario: %ld segundos, %ld microsegundos\n",
                   usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
 	    fprintf(archivoEscritura,"  Tiempo de sistema: %ld segundos, %ld microsegundos\n",
                   usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
-	    fprintf(archivoEscritura,"Tiempo en modo kernel: %ld.%06ld s\n\n",usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	    fprintf(archivoEscritura,"  Tiempo en modo kernel: %f s\n\n",tiempoReal);
+	    fprintf(archivoEscritura,"Peak de memoria maxima residente: %ld\n", usage.ru_maxrss);
         } else {
-            perror("Error al obtener recursos");
+            perror("Error al obtener recursos\n");
         }
       }
       fclose(archivoEscritura);
+    }else if(strcmp(args[1],"ejecutar")==0){
+        char *sobrante;
+        long tiempo = strtol(args[2],&sobrante,10);
+
+        struct itimerval tiempoMax;    
+        
+	if(*sobrante == '\0'){
+          printf("No es valido el tiempo ingresado.\n");
+	  return -1;
+        }
+
+        if (strcmp(sobrante, "s") == 0) {
+            tiempoMax.it_value.tv_sec = tiempo;
+        } else if (strcmp(sobrante, "us") == 0) {
+            tiempoMax.it_value.tv_usec = tiempo;
+        } else {
+            printf("Tiempo no valido. Debe especificar una unidad: 's' para segundos o 'ms' para milisegundos.\n");
+            return -1;
+        }
+
+
+        struct sigaction cancelacion;
+	sigemptyset(&cancelacion.sa_mask);
+	cancelacion.sa_flags = 0;
+	sigaddset(&cancelacion.sa_mask,SIGALRM);
+        sigaddset(&cancelacion.sa_mask,SIGCHLD);
+	cancelacion.sa_handler = cancelar;
+	int señales = sigaction(SIGALRM,&cancelacion,NULL);
+	if(señales==-1){
+          printf("Error al configurar el comando, intente nuevamente.\n");
+	  return -1;
+	}
+	
+        char **nuevosargs = &args[3];
+        struct rusage usage;
+	struct timespec inicio, final;
+
+
+        pid_t procesoHijo_id = fork();
+	hijoCode = procesoHijo_id;
+	clock_gettime(CLOCK_MONOTONIC,&inicio);
+	
+        if(procesoHijo_id == 0){
+          struct sigaction sa_child;
+          memset(&sa_child, 0, sizeof(sa_child));
+          sa_child.sa_handler = SIG_DFL;
+          sigaction(SIGALRM, &sa_child, NULL);
+	  
+          execvp(nuevosargs[0],nuevosargs);
+          perror("Ha sucedido un error\n");
+          limpiar_matriz(nuevosargs);
+          exit(EXIT_FAILURE);
+        }else{
+	  if(setitimer(ITIMER_REAL,&tiempoMax,NULL)==-1){
+            printf("Error al configurar el temporizador, intente nuevamente.\n");
+	    return -1;
+	  }
+          int estadoHijo;
+
+	  while (wait4(procesoHijo_id, &estadoHijo, 0, &usage) == -1) {
+            if (errno != EINTR) {
+              perror("Error al esperar al proceso hijo\n");
+              return -1;
+           }
+          }
+
+	  memset(&tiempoMax, 0, sizeof(tiempoMax));
+          setitimer(ITIMER_REAL, &tiempoMax, NULL);
+          clock_gettime(CLOCK_MONOTONIC, &final);
+          hijoCode = -1;
+	  
+	  clock_gettime(CLOCK_MONOTONIC,&final);
+	    
+	  if(WIFEXITED(estadoHijo) && WEXITSTATUS(estadoHijo) == EXIT_FAILURE){
+	    return -1;
+          }else if(WIFSIGNALED(estadoHijo) && WTERMSIG(estadoHijo) == SIGKILL){
+	    printf("El proceso no pudo realizarse antes del tiempo propuesto.\n");
+            return 0;
+	  }
+	  double tiempoReal = (final.tv_sec - inicio.tv_sec) + (final.tv_nsec - inicio.tv_nsec) / 1000000000.0;
+          printf("Tiempos de ejecucion:\n");
+          printf("  Tiempo de usuario: %ld segundos, %ld microsegundos\n",
+                usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
+          printf("  Tiempo de sistema: %ld segundos, %ld microsegundos\n",
+                usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+          printf("  Tiempo real: %f s\n",tiempoReal);
+          printf("Peak de memoria maxima residente: %ld\n", usage.ru_maxrss);
+          
+	  
+        }
+
+      
+      
     }else {
         printf("Uso: miprof <argumento>\n");
     }
